@@ -1,12 +1,21 @@
-import { Injectable } from '@nestjs/common';
-import { envs } from 'src/config';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { NATS_SERVICE, envs } from 'src/config';
 import Stripe from 'stripe';
 import { PaymentSessionDto } from './dto/payment-session.dto';
 import { Request, Response } from 'express';
+import { ClientProxy } from '@nestjs/microservices';
 
 @Injectable()
 export class PaymentsService {
+
   private readonly stripe = new Stripe(envs.stripeSecret);
+  private readonly logger = new Logger('PaymentsService');
+
+  constructor(
+    @Inject(NATS_SERVICE) private readonly client: ClientProxy
+  ) { }
+
+
 
   async createPaymentSession(paymentSessionDto: PaymentSessionDto) {
     const { currency, items, orderId } = paymentSessionDto;
@@ -18,7 +27,7 @@ export class PaymentsService {
           product_data: {
             name: item.name,
           },
-          unit_amount: Math.round(item.price * 100), // redondeamos el valor de los decimales que puedan venir x los dolares.
+          unit_amount: Math.round(item.price * 100), // 20 dólares 2000 / 100 = 20.00 // 15.0000
         },
         quantity: item.quantity,
       };
@@ -31,13 +40,18 @@ export class PaymentsService {
           orderId: orderId
         },
       },
-      line_items: lineItems, //items que la gente está comprando
+      line_items: lineItems,
       mode: 'payment',
-      success_url: envs.stripeSuccessUrl, //get propio para el mensaje de éxito
-      cancel_url: envs.stripeCancelUrl, 
+      success_url: envs.stripeSuccessUrl,
+      cancel_url: envs.stripeCancelUrl,
     });
 
-    return session;
+    // return session;
+    return {
+      cancelUrl: session.cancel_url,
+      successUrl: session.success_url,
+      url: session.url,
+    }
   }
 
   async stripeWebhook(req: Request, res: Response) {
@@ -60,13 +74,16 @@ export class PaymentsService {
     }
 
     switch (event.type) {
-      case 'charge.succeeded': //webhook de Stripe que nos interesa
+      case 'charge.succeeded':
         const chargeSucceeded = event.data.object;
-        // TODO: llamar nuestro microservicio
-        console.log({
-          metadata: chargeSucceeded.metadata,
+        const payload = {
+          stripePaymentId: chargeSucceeded.id,
           orderId: chargeSucceeded.metadata.orderId,
-        });
+          receiptUrl: chargeSucceeded.receipt_url,
+        }
+
+        // this.logger.log({ payload });
+        this.client.emit('payment.succeeded', payload);
         break;
 
       default:
